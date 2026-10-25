@@ -119,7 +119,7 @@ function go(view, arg) {
   if (!DATA) return;
   if (examRunning() && !confirm('Đang thi thử. Bỏ bài thi hiện tại?')) return;
   stopTimer(); session = null; window.scrollTo(0, 0);
-  ({ home, cheat, faq, browse, history, sources }[view] || home)(arg);
+  ({ home, cheat, faq, browse, history: examHistory, sources }[view] || home)(arg);
 }
 const backBtn = () => `<div class="row"><button class="btn sm" id="back">← Trang chính</button></div>`;
 const bindBack = () => { const b = $view.querySelector('#back'); if (b) b.onclick = () => go('home'); };
@@ -166,9 +166,15 @@ function home() {
       <button class="action" data-v="history"><b>Lịch sử thi thử</b><span>${hist.length} lần</span></button>
     </div>
     <p class="muted" style="margin-top:24px;font-size:13px">Tiến độ được lưu trong trình duyệt này. <button class="btn sm" id="reset">Xoá tiến độ ${esc(d.code)}</button>
-      ${store.get('key', null) ? '<button class="btn sm" id="forget">Quên mật khẩu trên thiết bị này</button>' : ''}</p>`;
+      ${store.get('key', null) ? `<button class="btn sm" id="share">Sao chép link mở sẵn</button>
+        <button class="btn sm" id="forget">Quên mật khẩu trên thiết bị này</button>` : ''}</p>`;
   const fg = $view.querySelector('#forget');
   if (fg) fg.onclick = () => { store.set('key', null); location.reload(); };
+  const sh = $view.querySelector('#share');
+  if (sh) sh.onclick = async () => {
+    const link = location.origin + location.pathname + '#k=' + store.get('key', '').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    try { await navigator.clipboard.writeText(link); sh.textContent = 'Đã sao chép ✓'; } catch { prompt('Link mở sẵn:', link); }
+  };
   $view.querySelectorAll('[data-a]').forEach(b => b.onclick = () => {
     const a = b.dataset.a;
     if (a === 'exam') return startExam();
@@ -383,7 +389,7 @@ function faq() {
 }
 
 // ---- exam history ----
-function history() {
+function examHistory() {
   const d = DATA[cert], hist = store.get('history.' + cert, []);
   $view.innerHTML = `${backBtn()}
     <h1 style="margin-top:12px">Lịch sử thi thử ${esc(d.code)}</h1>
@@ -414,10 +420,14 @@ async function unlock() {
   let bundle;
   try { bundle = await (await fetch('data.enc.json', { cache: 'no-cache' })).json(); }
   catch { $view.innerHTML = '<div class="empty">Không tải được dữ liệu (data.enc.json).</div>'; return; }
-  const saved = store.get('key', null);
+  // Share links carry the raw key in the URL fragment (#k=...), which browsers never send to the server.
+  const m = location.hash.match(/k=([A-Za-z0-9_-]+)/);
+  const fromLink = m && m[1].replace(/-/g, '+').replace(/_/g, '/');
+  if (m) history.replaceState(null, '', location.pathname + location.search);
+  const saved = fromLink || store.get('key', null);
   if (saved) {
-    try { return start(await decryptBundle(bundle, b64(saved))); }
-    catch { store.set('key', null); }  // data was re-encrypted with a new password
+    try { const data = await decryptBundle(bundle, b64(saved)); store.set('key', saved); return start(data); }
+    catch { store.set('key', null); }  // stale link, or data re-encrypted with a new password
   }
   $view.innerHTML = `<div class="card unlock">
     <h1>Mở khoá</h1><p class="muted">Dữ liệu câu hỏi được mã hoá. Nhập mật khẩu để tiếp tục.</p>

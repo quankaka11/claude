@@ -101,6 +101,7 @@ def encrypt(data: dict, password: str) -> None:
     OUT_ENC.write_text(json.dumps({"v": 1, "iter": PBKDF2_ITER, "salt": b64(salt), "iv": b64(iv), "ct": b64(ct)}),
                        encoding="utf-8")
     print("Wrote", OUT_ENC, f"({OUT_ENC.stat().st_size // 1024} KB)")
+    print("Share-link fragment (append to the site URL):", "#k=" + base64.urlsafe_b64encode(key).decode().rstrip("="))
 
 
 if __name__ == "__main__":
