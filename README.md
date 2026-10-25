@@ -36,20 +36,12 @@ python build.py                      # gộp, loại trùng -> docs/data.js
 
 ## Deploy lên GitHub Pages
 
-Site GitHub Pages luôn công khai, nên chỉ bản **đã mã hoá** `docs/data.enc.json` được đưa lên
-(gzip + AES-256-GCM, khoá dẫn xuất từ mật khẩu bằng PBKDF2-SHA256 600k vòng). `data/` và `docs/data.js`
-nằm trong `.gitignore` — **không bao giờ commit hai thứ này**.
-
-1. Tạo bản mã hoá (chạy lại mỗi khi dữ liệu thay đổi hoặc muốn đổi mật khẩu):
-   ```powershell
-   $env:CCAR_PASS = "<mật khẩu>"; python build.py
-   ```
-2. Commit và push nhánh `master`.
+1. Chạy `python build.py` để tạo `docs/data.js`.
+2. Commit (kể cả `docs/data.js`) và push nhánh `master`.
 3. Trên GitHub: **Settings → Pages → Build and deployment → Source: Deploy from a branch**,
    chọn `master` và thư mục `/docs`. Trang sẽ ở `https://<user>.github.io/<repo>/`.
 
-Mở trang, nhập mật khẩu (có tuỳ chọn ghi nhớ trên thiết bị). Đổi mật khẩu = chạy lại bước 1 rồi push;
-thiết bị đã ghi nhớ sẽ tự hỏi lại mật khẩu mới.
+Lưu ý: site GitHub Pages công khai kể cả khi repo private (trừ GitHub Enterprise Cloud bật private Pages).
 
 `crawl_free.py <tên nguồn>` để chỉ crawl lại một nguồn (`open_exam_prep`, `szymonpaluch`,
 `claudearchitectguide`, `timolabs`, `certsafari`, `github_olivieralter`). Cần `node` để đọc cheat sheet FlashGenius.

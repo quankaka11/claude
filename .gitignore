@@ -1,4 +1,3 @@
-# Plaintext question data stays local; only docs/data.enc.json is published.
+# Crawled raw data stays local; build.py turns it into docs/data.js, which is published.
 data/
-docs/data.js
 __pycache__/

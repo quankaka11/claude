@@ -2,22 +2,14 @@
 
 Run after crawl.py and/or crawl_free.py. Duplicates (same normalised question text) are dropped,
 keeping the first source in SOURCES order.
-
-With CCAR_PASS set, also writes docs/data.enc.json: the encrypted copy used by the public
-GitHub Pages site (docs/data.js stays local and is git-ignored).
 """
-import base64
-import gzip
 import json
-import os
 import re
 
 from crawl import CERTS, OUT_JS, RAW, ROOT
 
 FREE = ROOT / "data" / "free"
 STUDY = ROOT / "data" / "study.json"
-OUT_ENC = ROOT / "docs" / "data.enc.json"  # the only data file that gets published
-PBKDF2_ITER = 600_000
 
 # display name + homepage per source; order decides which copy wins on duplicates
 SOURCES = {
@@ -79,29 +71,6 @@ def build() -> None:
         print(f"{cfg['code']}: {len(questions)} unique questions ({len(pool) - len(questions)} duplicates dropped) {counts}")
     OUT_JS.write_text("window.CERT_DATA = " + json.dumps(data, ensure_ascii=False) + ";\n", encoding="utf-8")
     print("Wrote", OUT_JS)
-    if os.environ.get("CCAR_PASS"):
-        encrypt(data, os.environ["CCAR_PASS"])
-    else:
-        print("CCAR_PASS not set: skipped", OUT_ENC.name, "(needed for GitHub Pages)")
-
-
-def encrypt(data: dict, password: str) -> None:
-    """Write the password-encrypted bundle that the public site loads (gzip + AES-256-GCM, PBKDF2 key).
-
-    Must match unlock() in docs/app.js.
-    """
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
-    salt, iv = os.urandom(16), os.urandom(12)
-    key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=PBKDF2_ITER).derive(password.encode())
-    ct = AESGCM(key).encrypt(iv, gzip.compress(json.dumps(data, ensure_ascii=False).encode()), None)
-    b64 = lambda b: base64.b64encode(b).decode()
-    OUT_ENC.write_text(json.dumps({"v": 1, "iter": PBKDF2_ITER, "salt": b64(salt), "iv": b64(iv), "ct": b64(ct)}),
-                       encoding="utf-8")
-    print("Wrote", OUT_ENC, f"({OUT_ENC.stat().st_size // 1024} KB)")
-    print("Share-link fragment (append to the site URL):", "#k=" + base64.urlsafe_b64encode(key).decode().rstrip("="))
 
 
 if __name__ == "__main__":
