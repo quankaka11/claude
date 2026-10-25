@@ -1,0 +1,4 @@
+# Plaintext question data stays local; only docs/data.enc.json is published.
+data/
+docs/data.js
+__pycache__/

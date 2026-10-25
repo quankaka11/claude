@@ -1,0 +1,444 @@
+// Locally app/data.js defines CERT_DATA; the public site only ships data.enc.json (see unlock()).
+let DATA = window.CERT_DATA;
+const $view = document.getElementById('view');
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// escaped text with `inline code` rendered
+const fmt = s => esc(s).replace(/`([^`\n]+)`/g, '<code>$1</code>');
+const stripTags = s => String(s).replace(/<[^>]*>/g, '');
+const shuffle = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const fmtTime = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+// ---- persistence (best effort) ----
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('cap.' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('cap.' + k, JSON.stringify(v)); } catch {} },
+};
+let cert = store.get('cert', 'ccar-f');
+const progress = () => store.get('progress.' + cert, {});   // id -> {n, c, last}
+function record(id, correct) {
+  const p = progress(), s = p[id] || { n: 0, c: 0 };
+  s.n++; if (correct) s.c++; s.last = correct; p[id] = s;
+  store.set('progress.' + cert, p);
+}
+
+// ---- source filter ----
+const offSources = () => store.get('sourcesOff.' + cert, []);
+const pool = () => { const off = offSources(); return DATA[cert].questions.filter(q => !off.includes(q.source)); };
+const srcName = q => (DATA[cert].sources[q.source] || {}).name || q.source;
+
+// ---- question types: single (answer "B"), multi (["B","D"]), match ([optIdx per scenario]) ----
+const keysOf = q => q.correctAnswer ? q.correctAnswer.split(',') : [];
+function answered(q, a) {
+  if (a == null) return false;
+  if (q.type === 'single') return true;
+  if (q.type === 'multi') return a.length === keysOf(q).length;
+  return a.length === q.scenarios.length && a.every(v => v !== null && v !== undefined && v !== '');
+}
+function isCorrect(q, a) {
+  if (!answered(q, a)) return false;
+  if (q.type === 'single') return keysOf(q).includes(a);
+  if (q.type === 'multi') { const k = keysOf(q); return a.every(x => k.includes(x)); }
+  return q.matchAnswer.every((v, i) => +a[i] === v);
+}
+const typeHint = q => q.type === 'multi' ? `Chọn ${keysOf(q).length} đáp án` : q.type === 'match' ? 'Ghép cặp' : '';
+const correctText = q => q.type === 'match' ? 'xem bảng ghép bên trên' : keysOf(q).join(', ');
+
+// Renders the answer area. `a` = current answer, `reveal` = show right/wrong.
+function inputHtml(q, a, reveal) {
+  if (q.type === 'match') {
+    return `<div class="match">${q.scenarios.map((sc, i) => {
+      const v = a ? a[i] : undefined, ok = reveal && +v === q.matchAnswer[i];
+      return `<div class="match-row ${reveal ? (ok ? 'ok' : 'bad') : ''}"><div>${fmt(sc)}</div>
+        <select data-i="${i}" ${reveal ? 'disabled' : ''}><option value="">— chọn —</option>${q.matchOptions.map((o, j) =>
+          `<option value="${j}" ${v !== undefined && v !== null && v !== '' && +v === j ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>
+        ${reveal && !ok ? `<div class="match-fix">Đúng: ${fmt(q.matchOptions[q.matchAnswer[i]])}</div>` : ''}</div>`;
+    }).join('')}</div>`;
+  }
+  const keys = keysOf(q), picked = q.type === 'multi' ? (a || []) : (a ? [a] : []);
+  return Object.entries(q.options).map(([k, v]) => {
+    let cls = picked.includes(k) ? 'sel' : '';
+    if (reveal) cls = keys.includes(k) ? 'ok' : (picked.includes(k) ? 'bad' : '');
+    return `<button class="opt ${cls}" data-k="${k}" ${reveal ? 'disabled' : ''}><span class="k">${q.type === 'multi' ? (picked.includes(k) ? '☑' : '☐') + ' ' : ''}${k}</span><span>${fmt(v)}</span></button>`;
+  }).join('');
+}
+// Wires the answer area; calls onChange(newAnswer).
+function bindInput(q, a, onChange) {
+  if (q.type === 'match') {
+    $view.querySelectorAll('.match select').forEach(sel => sel.onchange = () => {
+      const next = (a || Array(q.scenarios.length).fill('')).slice(); next[+sel.dataset.i] = sel.value; onChange(next);
+    });
+    return;
+  }
+  $view.querySelectorAll('.opt:not([disabled])').forEach(b => b.onclick = () => {
+    const k = b.dataset.k;
+    if (q.type === 'single') return onChange(k);
+    const cur = (a || []).slice(), n = keysOf(q).length;
+    const next = cur.includes(k) ? cur.filter(x => x !== k) : (cur.length >= n ? [...cur.slice(1), k] : [...cur, k]);
+    onChange(next.sort());
+  });
+}
+function explHtml(text) {
+  const blocks = String(text).trim().split(/\n\s*\n/);
+  return blocks.map(b => {
+    const lines = b.split('\n').map(s => s.trim()).filter(Boolean);
+    const isItem = l => /^[-•]\s/.test(l), item = l => `<li>${fmt(l.replace(/^[-•]\s/, ''))}</li>`;
+    const items = lines.filter(isItem);
+    if (items.length && items.length === lines.length - 1 && !isItem(lines[0])) return `<p><b>${fmt(lines[0])}</b></p><ul>${items.map(item).join('')}</ul>`;
+    if (items.length === lines.length) return `<ul>${items.map(item).join('')}</ul>`;
+    return `<p>${lines.map(fmt).join('<br>')}</p>`;
+  }).join('');
+}
+const metaPills = (q, extra = '') => `<div class="row">${extra}<span class="pill">${esc(q.domain)}</span>
+  ${q.type !== 'single' ? `<span class="pill strong">${typeHint(q)}</span>` : ''}
+  <a class="pill" href="${esc(q.sourceUrl)}" target="_blank" rel="noopener">${esc(srcName(q))}</a></div>`;
+
+// ---- theme ----
+function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
+applyTheme(store.get('theme', null));
+document.getElementById('themeBtn').onclick = () => {
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const cur = document.documentElement.dataset.theme || (dark ? 'dark' : 'light');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  applyTheme(next); store.set('theme', next);
+};
+
+// ---- navigation ----
+let session = null, timerId = null;
+function stopTimer() { clearInterval(timerId); timerId = null; }
+const examRunning = () => session && session.mode === 'exam' && !session.done;
+function renderTabs() {
+  document.getElementById('certTabs').innerHTML = Object.keys(DATA).map(k =>
+    `<button class="${k === cert ? 'on' : ''}" data-c="${k}">${DATA[k].code}</button>`).join('');
+  document.querySelectorAll('#certTabs button').forEach(b => b.onclick = () => {
+    if (examRunning() && !confirm('Đang thi thử. Bỏ bài thi hiện tại?')) return;
+    cert = b.dataset.c; store.set('cert', cert); stopTimer(); session = null; renderTabs(); home();
+  });
+}
+document.querySelector('.brand').onclick = () => go('home');
+function go(view, arg) {
+  if (!DATA) return;
+  if (examRunning() && !confirm('Đang thi thử. Bỏ bài thi hiện tại?')) return;
+  stopTimer(); session = null; window.scrollTo(0, 0);
+  ({ home, cheat, faq, browse, history, sources }[view] || home)(arg);
+}
+const backBtn = () => `<div class="row"><button class="btn sm" id="back">← Trang chính</button></div>`;
+const bindBack = () => { const b = $view.querySelector('#back'); if (b) b.onclick = () => go('home'); };
+
+// ---- home ----
+const domainsOf = d => Object.keys(d.weights);
+function home() {
+  const d = DATA[cert], p = progress(), qs = pool();
+  const done = qs.filter(q => p[q.id]), right = done.filter(q => p[q.id].last).length;
+  const wrong = qs.filter(q => p[q.id] && !p[q.id].last).length;
+  const hist = store.get('history.' + cert, []);
+  const best = hist.length ? Math.max(...hist.map(h => h.pct)) : null;
+  const nSrc = Object.keys(d.sources).length, nOff = offSources().length;
+  $view.innerHTML = `
+    <h1>${esc(d.code)} · ${esc(d.name)}</h1>
+    <div class="muted">Kỳ thi thật: ${d.exam.questions} câu · ${d.exam.minutes} phút · Đạt ${esc(d.exam.passing)} · Lệ phí ${esc(d.exam.cost)}</div>
+    <div class="stats">
+      <div class="card stat"><div class="v">${qs.length}</div><div class="l">Câu đang dùng${nOff ? ` / ${d.questions.length}` : ''}</div></div>
+      <div class="card stat"><div class="v">${done.length}</div><div class="l">Đã làm</div></div>
+      <div class="card stat"><div class="v">${done.length ? Math.round(right / done.length * 100) + '%' : '—'}</div><div class="l">Đúng (lần gần nhất)</div></div>
+      <div class="card stat"><div class="v">${best === null ? '—' : best + '%'}</div><div class="l">Thi thử cao nhất</div></div>
+    </div>
+    <h2>Luyện tập</h2>
+    <div class="grid">
+      <button class="action" data-a="exam"><b>Thi thử có giờ</b><span>${Math.min(d.exam.questions, qs.length)} câu theo tỷ trọng domain, chấm điểm cuối bài</span></button>
+      <button class="action" data-a="all"><b>Luyện ngẫu nhiên</b><span>Toàn bộ câu đang dùng, xem đáp án ngay</span></button>
+      <button class="action" data-a="new"><b>Câu chưa làm</b><span>${qs.length - done.length} câu</span></button>
+      <button class="action" data-a="wrong" ${wrong ? '' : 'disabled'}><b>Ôn câu sai</b><span>${wrong} câu trả lời sai gần nhất</span></button>
+    </div>
+    <h2>Theo domain</h2>
+    <div class="card">${domainsOf(d).map(dom => {
+      const dq = qs.filter(q => q.domain === dom), dd = dq.filter(q => p[q.id]), ok = dd.filter(q => p[q.id].last).length;
+      return `<div class="domain">
+        <div><b>${esc(dom)}</b><div class="meta">Tỷ trọng ${d.weights[dom]}% · ${dq.length} câu · đã làm ${dd.length}${dd.length ? ` · đúng ${Math.round(ok / dd.length * 100)}%` : ''}</div></div>
+        <button class="btn sm" data-dom="${esc(dom)}" ${dq.length ? '' : 'disabled'}>Luyện</button>
+        <div class="meter"><i style="width:${dq.length ? dd.length / dq.length * 100 : 0}%"></i></div>
+      </div>`; }).join('')}</div>
+    <h2>Tài liệu & cài đặt</h2>
+    <div class="grid">
+      <button class="action" data-v="cheat"><b>Cheat sheet</b><span>Khái niệm cốt lõi của từng domain</span></button>
+      <button class="action" data-v="browse"><b>Duyệt ngân hàng câu hỏi</b><span>Xem, lọc, tìm kiếm kèm đáp án</span></button>
+      <button class="action" data-v="sources"><b>Nguồn câu hỏi</b><span>${nSrc - nOff}/${nSrc} nguồn đang bật</span></button>
+      <button class="action" data-v="faq"><b>FAQ kỳ thi</b><span>Định dạng, domain, cách ôn</span></button>
+      <button class="action" data-v="history"><b>Lịch sử thi thử</b><span>${hist.length} lần</span></button>
+    </div>
+    <p class="muted" style="margin-top:24px;font-size:13px">Tiến độ được lưu trong trình duyệt này. <button class="btn sm" id="reset">Xoá tiến độ ${esc(d.code)}</button>
+      ${store.get('key', null) ? '<button class="btn sm" id="forget">Quên mật khẩu trên thiết bị này</button>' : ''}</p>`;
+  const fg = $view.querySelector('#forget');
+  if (fg) fg.onclick = () => { store.set('key', null); location.reload(); };
+  $view.querySelectorAll('[data-a]').forEach(b => b.onclick = () => {
+    const a = b.dataset.a;
+    if (a === 'exam') return startExam();
+    if (a === 'all') startPractice(shuffle(qs), 'Luyện ngẫu nhiên');
+    if (a === 'new') startPractice(shuffle(qs.filter(q => !p[q.id])), 'Câu chưa làm');
+    if (a === 'wrong') startPractice(shuffle(qs.filter(q => p[q.id] && !p[q.id].last)), 'Ôn câu sai');
+  });
+  $view.querySelectorAll('[data-dom]').forEach(b => b.onclick = () =>
+    startPractice(shuffle(qs.filter(q => q.domain === b.dataset.dom)), b.dataset.dom));
+  $view.querySelectorAll('[data-v]').forEach(b => b.onclick = () => go(b.dataset.v));
+  $view.querySelector('#reset').onclick = () => {
+    if (confirm('Xoá toàn bộ tiến độ và lịch sử thi thử của ' + d.code + '?')) { store.set('progress.' + cert, {}); store.set('history.' + cert, []); home(); }
+  };
+}
+
+// ---- sources ----
+function sources() {
+  const d = DATA[cert], off = offSources();
+  $view.innerHTML = `${backBtn()}
+    <h1 style="margin-top:12px">Nguồn câu hỏi ${esc(d.code)}</h1>
+    <p class="muted">Bỏ chọn một nguồn để loại câu của nguồn đó khỏi luyện tập, thi thử và thống kê. Tất cả là đề luyện không chính thức, không phải đề thi thật của Anthropic.</p>
+    <div class="card">${Object.entries(d.sources).map(([k, s]) => `<label class="src-row">
+      <input type="checkbox" data-s="${k}" ${off.includes(k) ? '' : 'checked'}>
+      <span><b>${esc(s.name)}</b> <span class="muted">· ${s.count} câu</span></span>
+      <a href="${esc(s.url)}" target="_blank" rel="noopener" class="muted">trang gốc ↗</a></label>`).join('')}</div>`;
+  bindBack();
+  $view.querySelectorAll('[data-s]').forEach(c => c.onchange = () => {
+    const now = [...$view.querySelectorAll('[data-s]')].filter(x => !x.checked).map(x => x.dataset.s);
+    if (now.length === Object.keys(d.sources).length) { c.checked = true; return alert('Cần bật ít nhất một nguồn.'); }
+    store.set('sourcesOff.' + cert, now);
+  });
+}
+
+// ---- practice (instant feedback) ----
+function startPractice(qs, title) {
+  if (!qs.length) { alert('Không có câu nào.'); return; }
+  session = { mode: 'practice', title, qs, i: 0, answers: {}, drafts: {} };
+  renderPractice();
+}
+function renderPractice() {
+  const s = session, q = s.qs[s.i], checked = q.id in s.answers;
+  const a = checked ? s.answers[q.id] : s.drafts[q.id];
+  const doneIds = Object.keys(s.answers), right = s.qs.filter(x => x.id in s.answers && isCorrect(x, s.answers[x.id])).length;
+  const ok = checked && isCorrect(q, a);
+  $view.innerHTML = `
+    <div class="row"><button class="btn sm" id="back">← Trang chính</button><span class="spacer"></span>
+      <span class="muted">Câu ${s.i + 1}/${s.qs.length} · đúng ${right}/${doneIds.length}</span></div>
+    <div class="progress"><i style="width:${(s.i + 1) / s.qs.length * 100}%"></i></div>
+    <div class="card" style="margin-top:16px">
+      ${metaPills(q, `<span class="pill">${esc(s.title)}</span>`)}
+      <div class="qtext">${fmt(q.question)}</div>
+      ${inputHtml(q, a, checked)}
+      ${!checked && q.type !== 'single' ? `<button class="btn primary" id="check" ${answered(q, a) ? '' : 'disabled'}>Kiểm tra</button>` : ''}
+      ${checked ? `<div class="expl"><div class="verdict ${ok ? 'ok' : 'bad'}">${ok ? '✓ Chính xác' : '✗ Sai — đáp án đúng: ' + correctText(q)}</div>${explHtml(q.explanation)}</div>` : ''}
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button class="btn" id="prev" ${s.i ? '' : 'disabled'}>← Trước</button><span class="spacer"></span>
+      ${s.i < s.qs.length - 1 ? `<button class="btn primary" id="next">Tiếp →</button>` : `<button class="btn primary" id="finish">Kết thúc</button>`}
+    </div>`;
+  bindBack();
+  const commit = ans => { s.answers[q.id] = ans; record(q.id, isCorrect(q, ans)); renderPractice(); };
+  if (!checked) bindInput(q, a, ans => q.type === 'single' ? commit(ans) : (s.drafts[q.id] = ans, renderPractice()));
+  const c = $view.querySelector('#check'); if (c) c.onclick = () => commit(s.drafts[q.id]);
+  $view.querySelector('#prev').onclick = () => { s.i--; renderPractice(); };
+  const n = $view.querySelector('#next'); if (n) n.onclick = () => { s.i++; renderPractice(); window.scrollTo(0, 0); };
+  const f = $view.querySelector('#finish'); if (f) f.onclick = () => { alert(`Hoàn thành: đúng ${right}/${doneIds.length} câu đã trả lời.`); go('home'); };
+}
+
+// ---- exam simulation ----
+function pickExamQuestions(d, qs) {
+  const total = Math.min(d.exam.questions, qs.length), doms = domainsOf(d);
+  const pools = Object.fromEntries(doms.map(dom => [dom, shuffle(qs.filter(q => q.domain === dom))]));
+  let picked = doms.flatMap(dom => pools[dom].slice(0, Math.round(total * d.weights[dom] / 100)));
+  const rest = shuffle(qs.filter(q => !picked.includes(q)));
+  while (picked.length < total && rest.length) picked.push(rest.pop());
+  return shuffle(picked.slice(0, total));
+}
+function startExam() {
+  const d = DATA[cert], qs = pickExamQuestions(d, pool());
+  const secs = Math.round(d.exam.minutes * 60 * qs.length / d.exam.questions);
+  session = { mode: 'exam', qs, i: 0, answers: {}, flags: {}, end: Date.now() + secs * 1000, secs, done: false };
+  stopTimer(); timerId = setInterval(tick, 1000); renderExam();
+}
+function tick() {
+  if (!examRunning()) return stopTimer();
+  const el = document.getElementById('timer'), left = Math.max(0, Math.round((session.end - Date.now()) / 1000));
+  if (el) { el.textContent = fmtTime(left); el.classList.toggle('low', left < 300); }
+  if (!left) { stopTimer(); submitExam(); }
+}
+function renderExam() {
+  const s = session, q = s.qs[s.i], a = s.answers[q.id];
+  const left = Math.max(0, Math.round((s.end - Date.now()) / 1000));
+  const nDone = s.qs.filter(x => answered(x, s.answers[x.id])).length;
+  $view.innerHTML = `
+    <div class="row"><b>Thi thử ${esc(DATA[cert].code)}</b><span class="spacer"></span>
+      <span class="muted">Đã trả lời ${nDone}/${s.qs.length}</span>
+      <span class="timer ${left < 300 ? 'low' : ''}" id="timer">${fmtTime(left)}</span></div>
+    <div class="progress"><i style="width:${(s.i + 1) / s.qs.length * 100}%"></i></div>
+    <div class="card" style="margin-top:16px">
+      <div class="row"><span class="pill">Câu ${s.i + 1}/${s.qs.length}</span>${q.type !== 'single' ? `<span class="pill strong">${typeHint(q)}</span>` : ''}<span class="spacer"></span>
+        <button class="btn sm" id="flag">${s.flags[q.id] ? '★ Đã đánh dấu' : '☆ Đánh dấu xem lại'}</button></div>
+      <div class="qtext">${fmt(q.question)}</div>
+      ${inputHtml(q, a, false)}
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button class="btn" id="prev" ${s.i ? '' : 'disabled'}>← Trước</button>
+      <button class="btn" id="next" ${s.i < s.qs.length - 1 ? '' : 'disabled'}>Tiếp →</button>
+      <span class="spacer"></span><button class="btn primary" id="submit">Nộp bài</button></div>
+    <div class="card" style="margin-top:16px"><h3>Bảng câu hỏi</h3><div class="navgrid">${s.qs.map((x, i) =>
+      `<button data-i="${i}" class="${answered(x, s.answers[x.id]) ? 'ans' : ''} ${s.flags[x.id] ? 'flag' : ''} ${i === s.i ? 'cur' : ''}">${i + 1}</button>`).join('')}</div></div>`;
+  bindInput(q, a, ans => { s.answers[q.id] = ans; renderExam(); });
+  $view.querySelector('#flag').onclick = () => { s.flags[q.id] = !s.flags[q.id]; renderExam(); };
+  $view.querySelector('#prev').onclick = () => { s.i--; renderExam(); };
+  $view.querySelector('#next').onclick = () => { s.i++; renderExam(); };
+  $view.querySelectorAll('.navgrid button').forEach(b => b.onclick = () => { s.i = +b.dataset.i; renderExam(); });
+  $view.querySelector('#submit').onclick = () => {
+    const un = s.qs.length - nDone;
+    if (confirm(un ? `Còn ${un} câu chưa trả lời đủ. Nộp bài?` : 'Nộp bài?')) submitExam();
+  };
+}
+function submitExam() {
+  const s = session, d = DATA[cert]; stopTimer(); s.done = true;
+  const res = s.qs.map(q => ({ q, a: s.answers[q.id], ok: isCorrect(q, s.answers[q.id]) }));
+  res.forEach(r => { if (answered(r.q, r.a)) record(r.q.id, r.ok); });
+  const right = res.filter(r => r.ok).length, pct = Math.round(right / res.length * 100);
+  const used = s.secs - Math.max(0, Math.round((s.end - Date.now()) / 1000));
+  const byDom = domainsOf(d).map(dom => { const rs = res.filter(r => r.q.domain === dom); return { dom, n: rs.length, ok: rs.filter(r => r.ok).length }; }).filter(x => x.n);
+  const hist = store.get('history.' + cert, []);
+  hist.unshift({ at: new Date().toISOString(), pct, right, total: res.length, used, byDom });
+  store.set('history.' + cert, hist.slice(0, 50));
+  s.result = { res, right, pct, used, byDom, filter: 'all' };
+  renderResult();
+}
+function renderResult() {
+  const s = session, r = s.result;
+  // 72% is a rough stand-in for the 720/1000 scaled pass mark
+  const passed = r.pct >= 72;
+  const list = r.res.filter(x => r.filter === 'all' || (r.filter === 'wrong' ? !x.ok : x.ok));
+  $view.innerHTML = `
+    <div class="row"><button class="btn sm" id="back">← Trang chính</button><span class="spacer"></span><button class="btn sm primary" id="again">Thi lại</button></div>
+    <div class="card" style="margin-top:16px">
+      <div class="row" style="gap:24px">
+        <div><div class="score ${passed ? 'pass' : 'fail'}">${r.pct}%</div><div class="muted">${r.right}/${r.res.length} câu đúng · ${fmtTime(r.used)}</div></div>
+        <div><b class="${passed ? 'pass' : 'fail'}">${passed ? 'Đạt mức tham chiếu ≥72%' : 'Chưa đạt mức tham chiếu 72%'}</b>
+          <div class="muted" style="font-size:13px">Điểm thật là thang 1000 (đạt 720) có trọng số độ khó; % ở đây chỉ để tham khảo.</div></div>
+      </div>
+      <h3 style="margin-top:16px">Theo domain</h3>
+      ${r.byDom.map(x => `<div class="domain"><div><b>${esc(x.dom)}</b><div class="meta">${x.ok}/${x.n} đúng</div></div><span>${Math.round(x.ok / x.n * 100)}%</span><div class="meter"><i style="width:${x.ok / x.n * 100}%"></i></div></div>`).join('')}
+    </div>
+    <h2>Xem lại bài</h2>
+    <div class="chips">${[['all', 'Tất cả'], ['wrong', 'Sai / bỏ trống'], ['right', 'Đúng']].map(([k, l]) => `<button data-f="${k}" class="${r.filter === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    ${list.map(x => reviewCard(x.q, x.a, s.qs.indexOf(x.q) + 1, true)).join('') || '<div class="empty">Không có câu nào.</div>'}`;
+  $view.querySelector('#back').onclick = () => { session = null; go('home'); };
+  $view.querySelector('#again').onclick = () => { session = null; startExam(); };
+  $view.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { r.filter = b.dataset.f; renderResult(); });
+}
+// `a` = the user's answer, or undefined in browse mode (then the correct answer is shown)
+function reviewCard(q, a, num, graded) {
+  const ok = graded ? isCorrect(q, a) : true, blank = graded && !answered(q, a);
+  const shown = graded ? a : (q.type === 'match' ? q.matchAnswer : q.type === 'multi' ? keysOf(q) : keysOf(q)[0]);
+  return `<details><summary>${graded ? `<span class="${ok ? 'pass' : 'fail'}">${ok ? '✓' : '✗'}</span> ` : ''}${num ? 'Câu ' + num + ' · ' : ''}${esc(q.question.slice(0, 120))}${q.question.length > 120 ? '…' : ''}</summary><div>
+    <div style="margin-bottom:8px">${metaPills(q, blank ? '<span class="pill">Bỏ trống</span>' : '')}</div>
+    <div class="qtext" style="margin-top:0">${fmt(q.question)}</div>
+    ${inputHtml(q, shown, true)}
+    <div class="expl">${explHtml(q.explanation)}</div></div></details>`;
+}
+
+// ---- browse all questions ----
+function browse(filter = { dom: 'all', src: 'all', text: '' }) {
+  const d = DATA[cert];
+  const qs = d.questions.filter(q => (filter.dom === 'all' || q.domain === filter.dom) && (filter.src === 'all' || q.source === filter.src) &&
+    (!filter.text || (q.question + ' ' + Object.values(q.options || {}).join(' ')).toLowerCase().includes(filter.text.toLowerCase())));
+  $view.innerHTML = `${backBtn()}
+    <h1 style="margin-top:12px">Ngân hàng câu hỏi ${esc(d.code)}</h1>
+    <div class="row" style="margin:12px 0">
+      <select id="dom"><option value="all">Tất cả domain</option>${domainsOf(d).map(x =>
+        `<option value="${esc(x)}" ${filter.dom === x ? 'selected' : ''}>${esc(x)} (${d.questions.filter(q => q.domain === x).length})</option>`).join('')}</select>
+      <select id="src"><option value="all">Tất cả nguồn</option>${Object.entries(d.sources).map(([k, s]) =>
+        `<option value="${k}" ${filter.src === k ? 'selected' : ''}>${esc(s.name)} (${s.count})</option>`).join('')}</select>
+      <input id="q" class="search" placeholder="Tìm kiếm…" value="${esc(filter.text)}">
+    </div>
+    <div class="muted" style="margin-bottom:10px">${qs.length} câu</div>
+    ${qs.map((q, i) => reviewCard(q, undefined, i + 1, false)).join('') || '<div class="empty">Không tìm thấy.</div>'}`;
+  bindBack();
+  $view.querySelector('#dom').onchange = e => browse({ ...filter, dom: e.target.value });
+  $view.querySelector('#src').onchange = e => browse({ ...filter, src: e.target.value });
+  $view.querySelector('#q').onchange = e => browse({ ...filter, text: e.target.value });
+}
+
+// ---- cheat sheet ----
+const titleCase = k => k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+function cheat() {
+  const d = DATA[cert];
+  const cards = (d.cheatsheet || []).filter(c => !Object.values(c.content).some(v => Array.isArray(v) && v[0] && v[0].href));
+  $view.innerHTML = `${backBtn()}
+    <h1 style="margin-top:12px">Cheat sheet ${esc(d.code)}</h1>
+    ${cards.map(c => `<details ${c.type === 'instruction' ? 'open' : ''}><summary>${esc(c.title)}${c.subtitle ? ` <span class="muted" style="font-weight:400">· ${esc(c.subtitle)}</span>` : ''}</summary><div>
+      ${Object.entries(c.content).map(([k, v]) => `<h3 style="margin-top:12px">${esc(titleCase(k))}</h3>${
+        v.map(x => typeof x === 'string' ? `<div class="concept">${esc(stripTags(x))}</div>`
+          : `<div class="concept"><b>${esc(x.concept)}</b><span class="muted">${esc(x.description)}</span></div>`).join('')}`).join('')}
+    </div></details>`).join('')}`;
+  bindBack();
+}
+
+// ---- faq ----
+function faq() {
+  const d = DATA[cert];
+  $view.innerHTML = `${backBtn()}
+    <h1 style="margin-top:12px">FAQ ${esc(d.code)}</h1>
+    ${(d.faq || []).map((f, i) => `<details ${i < 4 ? 'open' : ''}><summary>${esc(f.q)}</summary><div>${esc(f.a)}</div></details>`).join('')}`;
+  bindBack();
+}
+
+// ---- exam history ----
+function history() {
+  const d = DATA[cert], hist = store.get('history.' + cert, []);
+  $view.innerHTML = `${backBtn()}
+    <h1 style="margin-top:12px">Lịch sử thi thử ${esc(d.code)}</h1>
+    ${hist.length ? hist.map(h => `<div class="card" style="margin-bottom:10px"><div class="row">
+      <b class="${h.pct >= 72 ? 'pass' : 'fail'}" style="font-size:20px">${h.pct}%</b><span>${h.right}/${h.total}</span>
+      <span class="muted">${fmtTime(h.used)}</span><span class="spacer"></span><span class="muted">${new Date(h.at).toLocaleString('vi-VN')}</span></div>
+      <div class="muted" style="font-size:13px;margin-top:6px">${h.byDom.map(x => `${esc(x.dom)}: ${x.ok}/${x.n}`).join(' · ')}</div></div>`).join('')
+      : '<div class="empty">Chưa có lần thi thử nào.</div>'}`;
+  bindBack();
+}
+
+window.addEventListener('beforeunload', e => { if (examRunning()) { e.preventDefault(); e.returnValue = ''; } });
+
+// ---- encrypted bundle (must match encrypt() in build.py: gzip + AES-256-GCM, PBKDF2-SHA256 key) ----
+const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+async function decryptBundle(bundle, rawKey) {
+  const key = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(bundle.iv) }, key, b64(bundle.ct));
+  const text = await new Response(new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+  return JSON.parse(text);
+}
+async function deriveKey(bundle, password) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: b64(bundle.salt), iterations: bundle.iter }, base, 256));
+}
+async function unlock() {
+  let bundle;
+  try { bundle = await (await fetch('data.enc.json', { cache: 'no-cache' })).json(); }
+  catch { $view.innerHTML = '<div class="empty">Không tải được dữ liệu (data.enc.json).</div>'; return; }
+  const saved = store.get('key', null);
+  if (saved) {
+    try { return start(await decryptBundle(bundle, b64(saved))); }
+    catch { store.set('key', null); }  // data was re-encrypted with a new password
+  }
+  $view.innerHTML = `<div class="card unlock">
+    <h1>Mở khoá</h1><p class="muted">Dữ liệu câu hỏi được mã hoá. Nhập mật khẩu để tiếp tục.</p>
+    <form id="unlock"><input id="pw" type="password" class="search" placeholder="Mật khẩu" autocomplete="current-password" autofocus>
+      <label class="row muted" style="margin:10px 0;font-size:14px"><input type="checkbox" id="remember" checked> Ghi nhớ trên thiết bị này</label>
+      <button class="btn primary" type="submit">Mở khoá</button> <span id="msg" class="fail"></span></form></div>`;
+  $view.querySelector('#unlock').onsubmit = async e => {
+    e.preventDefault();
+    const msg = $view.querySelector('#msg'); msg.textContent = 'Đang giải mã…'; msg.className = 'muted';
+    try {
+      const key = await deriveKey(bundle, $view.querySelector('#pw').value);
+      const data = await decryptBundle(bundle, key);
+      if ($view.querySelector('#remember').checked) store.set('key', btoa(String.fromCharCode(...key)));
+      start(data);
+    } catch { msg.textContent = 'Sai mật khẩu.'; msg.className = 'fail'; }
+  };
+}
+function start(data) {
+  DATA = data;
+  if (!DATA[cert]) cert = 'ccar-f';
+  renderTabs(); home();
+}
+
+if (DATA) start(DATA); else unlock();
